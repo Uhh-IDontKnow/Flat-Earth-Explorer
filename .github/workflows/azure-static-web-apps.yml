@@ -1,0 +1,117 @@
+name: Deploy Flat Earth Explorer to Azure Static Web Apps
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, synchronize, reopened, closed ]
+    branches: [ main ]
+
+jobs:
+  build_and_deploy:
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── BUILD: Copy src to a clean build folder and inject API key ──
+      # We deploy from ./build (not ./src) so the SWA CLI only sees our
+      # prepared output. This avoids any issue with the CLI re-reading
+      # files from git rather than from the modified filesystem.
+      - name: Build and inject API key
+        env:
+          MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+
+            const apiKey = process.env.MAPS_API_KEY;
+
+            if (!apiKey) {
+              console.error('❌ GOOGLE_MAPS_API_KEY secret is empty or not set.');
+              console.error('   Repo → Settings → Secrets and variables → Actions');
+              process.exit(1);
+            }
+
+            // Copy ./src to ./build
+            function copyDir(src, dest) {
+              fs.mkdirSync(dest, { recursive: true });
+              for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                const srcPath = path.join(src, entry.name);
+                const destPath = path.join(dest, entry.name);
+                if (entry.isDirectory()) {
+                  copyDir(srcPath, destPath);
+                } else {
+                  fs.copyFileSync(srcPath, destPath);
+                }
+              }
+            }
+            copyDir('./src', './build');
+            console.log('✅ Copied ./src to ./build');
+
+            // Inject API key into build/index.html
+            const htmlPath = './build/index.html';
+            const placeholder = 'YOUR_GOOGLE_MAPS_API_KEY';
+            let html = fs.readFileSync(htmlPath, 'utf8');
+
+            if (!html.includes(placeholder)) {
+              console.error('❌ Placeholder not found in index.html');
+              process.exit(1);
+            }
+
+            fs.writeFileSync(htmlPath, html.replaceAll(placeholder, apiKey), 'utf8');
+            console.log('✅ API key injected into build/index.html');
+
+            // Verify
+            const built = fs.readFileSync(htmlPath, 'utf8');
+            if (built.includes(placeholder)) {
+              console.error('❌ Placeholder still present after replacement');
+              process.exit(1);
+            }
+
+            const preview = apiKey.substring(0, 4) + '...' + apiKey.slice(-4);
+            console.log('✅ Verified. Key preview: ' + preview);
+          "
+
+      # ── VERIFY: Show what is about to be deployed ──
+      - name: Verify build folder
+        run: |
+          echo "── Files in ./build ──"
+          ls -la ./build/
+          echo ""
+          echo "── API key line in build/index.html ──"
+          grep "MAPS_API_KEY" ./build/index.html
+
+      # ── DEPLOY from ./build, not ./src ──
+      - name: Install SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
+
+      - name: Deploy
+        run: swa deploy ./build --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env production
+
+  close_pull_request:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
+
+      - name: Close staging environment
+        run: swa deploy --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env close
