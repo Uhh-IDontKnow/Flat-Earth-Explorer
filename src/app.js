@@ -1,737 +1,699 @@
 /**
- * FLAT EARTH EXPLORER — app.js (v2)
- * Modern UI wired to all the new HTML/CSS elements
+ * FLAT EARTH EXPLORER — app.js (v4)
+ *
+ * SPIKE FIX: CircleGeometry has a UV wrap seam that causes radial spikes.
+ *            Replaced with PlaneGeometry — simple 0..1 grid UVs, no seams.
+ *            The circle shape is enforced by discarding fragments in the shader.
+ *
+ * Other changes vs v2:
+ *  - Ice mountains (procedural ConeGeometry peaks around edge)
+ *  - Inverted bedrock underside (displaced CircleGeometry facing down)
+ *  - Zoom is camera-distance only — texture never reloads on scroll
+ *  - World map loads at zoom=0 (full Earth) so continents fill the disc
  */
 "use strict";
 
-/* ═══════════════════════════════════════════════════════
-   0.  STATE
-═══════════════════════════════════════════════════════ */
-const DISC_RADIUS  = 10;
-const DISC_SEGS    = 256;
-const WALL_HEIGHT  = 0.9;
-const WALL_SEGS    = 128;
-const WATERFALL_H  = 3.5;
-const EARTH_R_KM   = 6371;
+/* ─────────────────────────────────────────────────
+   CONSTANTS & SEEDED RNG
+───────────────────────────────────────────────── */
+const DISC_R    = 10;
+const DISC_SEGS = 512;   // cylinder edge smoothness
+const WF_H      = 3.8;   // waterfall height
 
-let state = {
-  camDist:     22,
-  camTheta:    Math.PI / 4,
-  camPhi:      Math.PI / 3,
-  targetLat:   30,
-  targetLon:   0,
-  mapZoom:     2,
-  nightMode:   false,
-  waterfallOn: true,
-  streetMode:  false,
-  dragging:    false,
-  lastMouse:   { x: 0, y: 0 },
-  pinchDist:   null,
-  hintShown:   false,
+let _s = 42;
+const srng = () => { _s = (_s * 1664525 + 1013904223) & 0xffffffff; return ((_s >>> 0) / 0xffffffff); };
+const rng  = (a, b) => a + srng() * (b - a);
+
+/* ─────────────────────────────────────────────────
+   STATE
+───────────────────────────────────────────────── */
+const state = {
+  camDist:   24,
+  camTheta:  Math.PI / 4,
+  camPhi:    Math.PI / 3,
+  nightMode: false,
+  street:    false,
+  drag:      false,
+  lastXY:    { x: 0, y: 0 },
+  pinch:     null,
+  hinted:    false,
 };
 
-/* ═══════════════════════════════════════════════════════
-   1.  THREE.JS SETUP
-═══════════════════════════════════════════════════════ */
-const canvas   = document.getElementById("glCanvas");
+/* ─────────────────────────────────────────────────
+   RENDERER / SCENE / CAMERA
+───────────────────────────────────────────────── */
+const canvas = document.getElementById("glCanvas");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled  = true;
-renderer.shadowMap.type     = THREE.PCFSoftShadowMap;
-renderer.toneMapping        = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled   = true;
+renderer.shadowMap.type      = THREE.PCFSoftShadowMap;
+renderer.toneMapping         = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 
 const scene  = new THREE.Scene();
-scene.background = new THREE.Color(0x090c14);
+scene.background = new THREE.Color(0x070a12);
+scene.fog        = new THREE.FogExp2(0x070a12, 0.008);
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 2000);
-updateCamera();
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 2000);
 
-/* Stars */
-(function buildStars() {
-  const geo = new THREE.BufferGeometry();
-  const n   = 9000;
-  const pos = new Float32Array(n * 3);
-  for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 1400;
-  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.25, sizeAttenuation: true })));
+/* stars */
+(() => {
+  const g = new THREE.BufferGeometry();
+  const p = new Float32Array(12000 * 3);
+  for (let i = 0; i < p.length; i++) p[i] = (Math.random() - 0.5) * 1600;
+  g.setAttribute("position", new THREE.BufferAttribute(p, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 0.22, sizeAttenuation: true })));
 })();
 
-/* Lights */
-const ambient  = new THREE.AmbientLight(0x1a2a40, 0.7);
-scene.add(ambient);
-const sun      = new THREE.DirectionalLight(0xfff4e0, 2.0);
-sun.position.set(18, 24, 12);
+/* lights */
+const ambientLight = new THREE.AmbientLight(0x1a2a40, 0.75);
+scene.add(ambientLight);
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
+sun.position.set(18, 28, 12);
 sun.castShadow = true;
 scene.add(sun);
-const rim      = new THREE.DirectionalLight(0x4aeadc, 0.25);
-rim.position.set(-20, 5, -15);
-scene.add(rim);
+scene.add(Object.assign(new THREE.DirectionalLight(0x4aeadc, 0.22), { position: new THREE.Vector3(-20, 6, -15) }));
+// under-light for bedrock
+scene.add(Object.assign(new THREE.DirectionalLight(0x2a1800, 0.8), { position: new THREE.Vector3(4, -22, 6) }));
 
-/* ═══════════════════════════════════════════════════════
-   2.  DISC GEOMETRY
-═══════════════════════════════════════════════════════ */
-/* Disc body (cylinder, very thin) */
-const discGeo = new THREE.CylinderGeometry(DISC_RADIUS, DISC_RADIUS, 0.18, DISC_SEGS, 1, false);
-const discMat = new THREE.MeshStandardMaterial({ color: 0x1a5c80, roughness: 0.8, metalness: 0.05 });
-const disc    = new THREE.Mesh(discGeo, discMat);
-disc.receiveShadow = true;
-scene.add(disc);
+/* ─────────────────────────────────────────────────
+   DISC CYLINDER BODY (edge / underside rim)
+───────────────────────────────────────────────── */
+const bodyGeo = new THREE.CylinderGeometry(DISC_R, DISC_R, 0.22, DISC_SEGS, 1, false);
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0f2535, roughness: 0.92, metalness: 0.04 });
+const body    = new THREE.Mesh(bodyGeo, bodyMat);
+body.receiveShadow = true;
+scene.add(body);
 
-/* Top face — shader material (receives map texture + night) */
-const topGeo = new THREE.CircleGeometry(DISC_RADIUS, DISC_SEGS);
-const topMat = new THREE.ShaderMaterial({
+/* ─────────────────────────────────────────────────
+   TOP FACE — PlaneGeometry (NO UV SEAM = NO SPIKES)
+
+   CircleGeometry wraps UVs around its perimeter.
+   Where u≈0 and u≈1 meet, triangles span the full
+   texture width → the GPU interpolates across the
+   whole image → radial spikes.
+
+   PlaneGeometry has a simple uniform grid:
+   u goes 0→1 left→right, v goes 0→1 bottom→top.
+   No wraparound at all. We clip to a circle by
+   discarding fragment if length(uv-0.5) > 0.5.
+───────────────────────────────────────────────── */
+const topGeo  = new THREE.PlaneGeometry(DISC_R * 2, DISC_R * 2, 2, 2);
+const topMat  = new THREE.ShaderMaterial({
   uniforms: {
     tMap:     { value: null },
-    nightAmt: { value: 0.0 },
     hasTex:   { value: 0.0 },
+    nightAmt: { value: 0.0 },
   },
   vertexShader: `
     varying vec2 vUv;
-    void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }
+    void main() {
+      vUv = uv;   // simple 0..1 grid, no seams
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
   `,
   fragmentShader: `
     uniform sampler2D tMap;
-    uniform float nightAmt;
-    uniform float hasTex;
+    uniform float     hasTex;
+    uniform float     nightAmt;
     varying vec2 vUv;
-    void main(){
-      float r = length(vUv-0.5)*2.0;
-      vec3 base = mix(vec3(0.08,0.30,0.55), vec3(0.03,0.12,0.32), smoothstep(0.5,1.0,r));
+    void main() {
+      float r = length(vUv - 0.5);
+
+      // Clip to disc shape — this is what replaces CircleGeometry's shape
+      if (r > 0.5) discard;
+
+      // Normalised radius 0..1
+      float nr = r * 2.0;
+
+      // Base ocean gradient
+      vec3 base = mix(vec3(0.08,0.30,0.55), vec3(0.03,0.10,0.28), smoothstep(0.4, 1.0, nr));
       vec4 col  = vec4(base, 1.0);
-      if(hasTex>0.5){ vec4 t=texture2D(tMap,vUv); col=mix(col,t,0.93); }
-      vec3 night = col.rgb*0.06 + vec3(0.0,0.005,0.02);
-      col.rgb = mix(col.rgb, night, nightAmt);
-      col.rgb *= 1.0 - smoothstep(0.44, 0.5, r)*0.55;
+
+      if (hasTex > 0.5) {
+        // Clamp UVs away from the absolute edge to stop any border bleed
+        vec2 safeUv = clamp(vUv, 0.01, 0.99);
+        vec4 t = texture2D(tMap, safeUv);
+        col = mix(col, t, 0.94);
+      }
+
+      // Night mode
+      vec3 nightCol = col.rgb * 0.05 + vec3(0.0, 0.004, 0.018);
+      col.rgb = mix(col.rgb, nightCol, nightAmt);
+
+      // Soft vignette toward Antarctica ring
+      col.rgb *= 1.0 - smoothstep(0.42, 0.5, r) * 0.6;
+
       gl_FragColor = col;
     }
   `,
+  side: THREE.FrontSide,
 });
 const topMesh = new THREE.Mesh(topGeo, topMat);
 topMesh.rotation.x = -Math.PI / 2;
-topMesh.position.y  = 0.091;
+topMesh.position.y  = 0.112;
 topMesh.receiveShadow = true;
 scene.add(topMesh);
 
-/* Atmosphere glow ring */
-(function() {
-  const geo = new THREE.RingGeometry(DISC_RADIUS * 0.97, DISC_RADIUS * 1.09, DISC_SEGS);
-  const mat = new THREE.MeshBasicMaterial({ color: 0x4aeadc, side: THREE.DoubleSide, transparent: true, opacity: 0.12 });
+/* atmosphere glow ring */
+(() => {
+  const geo = new THREE.RingGeometry(DISC_R * 0.97, DISC_R * 1.10, DISC_SEGS);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x4aeadc, side: THREE.DoubleSide, transparent: true, opacity: 0.10 });
   const m   = new THREE.Mesh(geo, mat);
   m.rotation.x = -Math.PI / 2;
-  m.position.y  = 0.093;
+  m.position.y  = 0.114;
   scene.add(m);
 })();
 
-/* ═══════════════════════════════════════════════════════
-   3.  ICE WALL + WATERFALL
-═══════════════════════════════════════════════════════ */
-/* Ice wall */
-const wallGeo = new THREE.CylinderGeometry(DISC_RADIUS + 0.01, DISC_RADIUS + 0.01, WALL_HEIGHT, WALL_SEGS, 1, true);
-const wallMat = new THREE.MeshStandardMaterial({ color: 0xddeeff, roughness: 0.4, metalness: 0.2, side: THREE.DoubleSide, transparent: true, opacity: 0.93 });
-const wall    = new THREE.Mesh(wallGeo, wallMat);
-wall.position.y = 0.09 - WALL_HEIGHT / 2;
-scene.add(wall);
+/* ─────────────────────────────────────────────────
+   ICE MOUNTAINS  (replaces flat cylinder wall)
+   Three rings of jagged displaced cones
+───────────────────────────────────────────────── */
+const iceGroup = new THREE.Group();
+scene.add(iceGroup);
 
-/* Waterfall shader */
-const wfGeo = new THREE.CylinderGeometry(DISC_RADIUS + 0.015, DISC_RADIUS + 0.015, WATERFALL_H, WALL_SEGS, 32, true);
+(() => {
+  const mats = {
+    snow:   new THREE.MeshStandardMaterial({ color: 0xeef8ff, roughness: 0.40, metalness: 0.18 }),
+    ice:    new THREE.MeshStandardMaterial({ color: 0x88c4e0, roughness: 0.20, metalness: 0.35, transparent: true, opacity: 0.90 }),
+    rock:   new THREE.MeshStandardMaterial({ color: 0x4a6070, roughness: 0.75, metalness: 0.08 }),
+    shadow: new THREE.MeshStandardMaterial({ color: 0x2a3a48, roughness: 0.85, metalness: 0.05 }),
+  };
+
+  const rings = [
+    // outer tall dramatic peaks
+    { n: 80,  r: DISC_R + 0.08, hMin: 1.4, hMax: 3.8, bMin: 0.22, bMax: 0.55 },
+    // inner shorter jagged foothills
+    { n: 130, r: DISC_R - 0.50, hMin: 0.25, hMax: 1.5, bMin: 0.07, bMax: 0.22 },
+    // staggered outer lower layer
+    { n: 55,  r: DISC_R + 0.72, hMin: 0.3, hMax: 1.0, bMin: 0.08, bMax: 0.24 },
+  ];
+
+  rings.forEach(({ n, r, hMin, hMax, bMin, bMax }) => {
+    for (let i = 0; i < n; i++) {
+      const angle = (i / n) * Math.PI * 2 + rng(-0.05, 0.05);
+      const h     = rng(hMin, hMax);
+      const base  = rng(bMin, bMax);
+      const segs  = 3 + Math.floor(srng() * 4);   // triangular to hexagonal
+
+      const geo  = new THREE.ConeGeometry(base, h, segs);
+      const pos  = geo.attributes.position;
+
+      // Displace vertices for jagged rocky look — more at base, none at tip
+      for (let v = 0; v < pos.count; v++) {
+        const vy  = pos.getY(v);
+        const t   = 1.0 - Math.max(0, (vy + h * 0.5) / h); // 0 at tip, 1 at base
+        pos.setX(v, pos.getX(v) + rng(-base * 0.4,  base * 0.4)  * t);
+        pos.setZ(v, pos.getZ(v) + rng(-base * 0.4,  base * 0.4)  * t);
+        pos.setY(v, vy           + rng(-h    * 0.05, h    * 0.05));
+      }
+      geo.computeVertexNormals();
+
+      // Material by relative height
+      const norm = (h - hMin) / (hMax - hMin);
+      const mat  = norm > 0.65 ? mats.snow : norm > 0.38 ? mats.ice : norm > 0.18 ? mats.rock : mats.shadow;
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = mesh.receiveShadow = true;
+
+      const rad = r + rng(-0.35, 0.35);
+      mesh.position.set(rad * Math.cos(angle), 0.11 + h / 2, rad * Math.sin(angle));
+      mesh.rotation.set(rng(-0.07, 0.07), rng(0, Math.PI * 2), rng(-0.20, 0.20));
+      iceGroup.add(mesh);
+    }
+  });
+})();
+
+/* ─────────────────────────────────────────────────
+   WATERFALL  (animated water shader below ice ring)
+───────────────────────────────────────────────── */
+const wfGeo = new THREE.CylinderGeometry(DISC_R + 0.02, DISC_R + 0.02, WF_H, 128, 48, true);
 const wfMat = new THREE.ShaderMaterial({
-  uniforms: { time: { value: 0 }, opacity: { value: 0.75 } },
-  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+  uniforms: { time: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
   fragmentShader: `
     uniform float time;
-    uniform float opacity;
     varying vec2 vUv;
 
-    float rand(vec2 co){ return fract(sin(dot(co, vec2(12.9898,78.233))) * 43758.5453); }
-
-    // Smooth noise for turbulence
-    float noise(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      f = f * f * (3.0 - 2.0 * f);
-      float a = rand(i);
-      float b = rand(i + vec2(1.0, 0.0));
-      float c = rand(i + vec2(0.0, 1.0));
-      float d = rand(i + vec2(1.0, 1.0));
-      return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+    float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5); }
+    float noise(vec2 p){
+      vec2 i=floor(p), f=fract(p);
+      f=f*f*(3.-2.*f);
+      return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
     }
 
-    void main() {
-      float speed   = time * 0.9;
+    void main(){
+      // Each vertical lane falls at a slightly different speed
+      float lane   = floor(vUv.x * 60.);
+      float speed  = time * 1.2 + hash(vec2(lane,0.)) * 0.6;
+      float fall   = fract(vUv.y + speed);
 
-      // Stream lanes — each lane falls at slightly different speed
-      float laneX   = floor(vUv.x * 60.0);
-      float laneSpeed = speed + rand(vec2(laneX, 0.0)) * 0.4;
-
-      // Primary falling streaks
-      float fall    = fract(vUv.y + laneSpeed);
-      float streak  = smoothstep(0.0, 0.15, fall) * smoothstep(1.0, 0.6, fall);
+      // Primary streak
+      float streak = smoothstep(0.0,0.14,fall) * smoothstep(1.0,0.50,fall);
 
       // Turbulence ripples
-      float turb    = noise(vec2(vUv.x * 40.0, vUv.y * 8.0 + speed * 0.5)) * 0.5
-                    + noise(vec2(vUv.x * 80.0, vUv.y * 16.0 + speed)) * 0.25;
+      float t1 = noise(vec2(vUv.x*32., vUv.y*8.  + time*0.5));
+      float t2 = noise(vec2(vUv.x*68., vUv.y*18. + time*0.9));
+      float turb = t1*0.55 + t2*0.25;
 
-      // Foam at top of each streak
-      float foam    = smoothstep(0.55, 0.6, fall) * smoothstep(0.75, 0.6, fall);
+      // Foam at streak crest
+      float foam = smoothstep(0.46,0.54,fall) * smoothstep(0.70,0.54,fall);
 
-      // Deep water = dark teal-blue, foam/mist = white
-      vec3 deepWater = vec3(0.05, 0.25, 0.55);
-      vec3 midWater  = vec3(0.15, 0.50, 0.85);
-      vec3 foamCol   = vec3(0.85, 0.95, 1.00);
+      // Colour: deep navy → mid blue → white foam
+      vec3 deep = vec3(0.03,0.15,0.45);
+      vec3 mid  = vec3(0.10,0.40,0.80);
+      vec3 wht  = vec3(0.90,0.97,1.00);
+      vec3 col  = mix(deep, mid, streak);
+      col       = mix(col, wht, foam*0.88);
+      col      += turb * 0.07;
 
-      vec3 col = mix(deepWater, midWater, streak);
-      col      = mix(col, foamCol, foam * 0.9);
-      col      = mix(col, foamCol, turb * 0.15);
+      float alpha = (streak*(0.55+turb*0.30) + foam*0.55);
+      alpha *= smoothstep(1.0, 0.60, vUv.y);   // mist fade at bottom
+      alpha  = clamp(alpha, 0., 0.95);
 
-      // Alpha: transparent at very bottom (mist dissipation), opaque in middle
-      float alpha = streak * (0.5 + turb * 0.3) + foam * 0.6;
-      alpha *= opacity;
-      alpha *= smoothstep(1.0, 0.7, vUv.y); // fade out at bottom into mist
-
-      gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));
+      gl_FragColor = vec4(col, alpha);
     }
   `,
   transparent: true, side: THREE.DoubleSide, depthWrite: false,
 });
-const waterfall    = new THREE.Mesh(wfGeo, wfMat);
-waterfall.position.y = wall.position.y - WATERFALL_H / 2 + 0.01;
-scene.add(waterfall);
+const wfMesh = new THREE.Mesh(wfGeo, wfMat);
+wfMesh.position.y = 0.11 - WF_H / 2;
+scene.add(wfMesh);
 
-/* ═══════════════════════════════════════════════════════
-   4.  MAP TEXTURE
-═══════════════════════════════════════════════════════ */
-function latLonToUV(lat, lon) {
-  const c  = (Math.PI / 2 - lat * Math.PI / 180);
-  const lr = lon * Math.PI / 180;
-  const sc = 1 / (Math.PI * 0.505);
-  return [c * Math.sin(lr) * sc + 0.5, -c * Math.cos(lr) * sc + 0.5];
+/* Mist spray pool at base */
+(() => {
+  const geo = new THREE.CylinderGeometry(DISC_R + 0.5, DISC_R + 2.5, 0.3, 96, 1, true);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x8dd4f0, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false });
+  const m   = new THREE.Mesh(geo, mat);
+  m.position.y = 0.11 - WF_H - 0.1;
+  scene.add(m);
+})();
+
+/* ─────────────────────────────────────────────────
+   BEDROCK UNDERSIDE
+   Displaced CircleGeometry pointing DOWN — looks
+   like inverted rocky mountain terrain
+───────────────────────────────────────────────── */
+(() => {
+  // Primary bedrock layer
+  const geo = new THREE.CircleGeometry(DISC_R * 0.995, 180, 180);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    const r = Math.hypot(x, z) / DISC_R;
+    // Fractal octave sine displacement
+    let d = 0;
+    d += Math.sin(x * 1.8 + 0.5)   * Math.cos(z * 2.1 + 0.9) * 1.0;
+    d += Math.sin(x * 3.7 - z * 2.9 + 1.3) * 0.50;
+    d += Math.sin(x * 7.3 + z * 5.5 - 0.8) * 0.25;
+    d += Math.sin(x * 13.1 - z * 9.7 + 2.2) * 0.12;
+    d += Math.sin(x * 24.3 + z * 19.1) * 0.06;
+    const hang = Math.max(0, d + 0.7) * 3.2;
+    // Fade to zero at disc edge (mountains only in middle, flat at rim)
+    const fade = Math.pow(1.0 - Math.min(r, 1.0), 0.35);
+    pos.setY(i, -hang * fade);
+  }
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x2a1c10, roughness: 0.97, metalness: 0.02,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = Math.PI / 2;
+  mesh.position.y = -0.12;
+  mesh.castShadow = mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  // Darker crevice layer underneath for depth shadow
+  const geo2 = new THREE.CircleGeometry(DISC_R * 0.80, 140, 140);
+  const pos2 = geo2.attributes.position;
+  for (let i = 0; i < pos2.count; i++) {
+    const x = pos2.getX(i), z = pos2.getZ(i);
+    const r = Math.hypot(x, z) / (DISC_R * 0.80);
+    let d = 0;
+    d += Math.sin(x * 2.3 + 1.1) * Math.cos(z * 2.8 + 0.4) * 0.7;
+    d += Math.sin(x * 4.7 - z * 3.9) * 0.35;
+    d += Math.sin(x * 9.3 + z * 7.5) * 0.18;
+    const hang = Math.max(0, d + 0.5) * 2.8;
+    const fade = Math.pow(1.0 - Math.min(r, 1.0), 0.5);
+    pos2.setY(i, -hang * fade - 0.5);
+  }
+  geo2.computeVertexNormals();
+  const mat2 = new THREE.MeshStandardMaterial({ color: 0x140b04, roughness: 0.99, metalness: 0.0, side: THREE.DoubleSide });
+  const mesh2 = new THREE.Mesh(geo2, mat2);
+  mesh2.rotation.x = Math.PI / 2;
+  mesh2.position.y = -0.14;
+  scene.add(mesh2);
+})();
+
+/* ─────────────────────────────────────────────────
+   TEXTURE LOADING
+   Uses THREE.TextureLoader directly — no canvas
+   intermediary for real API textures.
+   World view: zoom=0 (full Earth), center=30,15
+   (shifts Atlantic left so Eurasia fills centre).
+───────────────────────────────────────────────── */
+function setTex(tex) {
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  topMat.uniforms.tMap.value   = tex;
+  topMat.uniforms.hasTex.value = 1.0;
 }
+
+function loadMapsTexture(lat, lon, zoom) {
+  if (!window.MAPS_API_KEY || window.MAPS_API_KEY === "YOUR_GOOGLE_MAPS_API_KEY") {
+    buildPlaceholder(); return;
+  }
+  const url = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=${zoom}&size=640x640&maptype=satellite&key=${window.MAPS_API_KEY}`;
+  new THREE.TextureLoader().load(url, setTex, undefined, () => buildPlaceholder());
+}
+
+function buildPlaceholder() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 1024;
+  const ctx = c.getContext("2d");
+  // ocean
+  const g = ctx.createRadialGradient(512,512,0,512,512,512);
+  g.addColorStop(0,"#1b6494"); g.addColorStop(0.55,"#0f4470"); g.addColorStop(1,"#041c38");
+  ctx.beginPath(); ctx.arc(512,512,510,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+  // continents
+  [ {cx:435,cy:345,rx:82,ry:115,rot:-0.3,col:"#3d7a3d"},
+    {cx:305,cy:445,rx:62,ry:82, rot: 0.2,col:"#4a8a2a"},
+    {cx:595,cy:365,rx:92,ry:78, rot: 0.5,col:"#5a8a3a"},
+    {cx:630,cy:500,rx:52,ry:48, rot:-0.1,col:"#6aaa4a"},
+  ].forEach(({cx,cy,rx,ry,rot,col})=>{
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(rot);
+    const gr=ctx.createRadialGradient(0,0,0,0,0,Math.max(rx,ry));
+    gr.addColorStop(0,col); gr.addColorStop(1,col+"88");
+    ctx.beginPath(); ctx.ellipse(0,0,rx,ry,0,0,Math.PI*2);
+    ctx.fillStyle=gr; ctx.fill(); ctx.restore();
+  });
+  // north-pole ice cap
+  const ig=ctx.createRadialGradient(512,512,0,512,512,60);
+  ig.addColorStop(0,"rgba(230,245,255,.96)"); ig.addColorStop(1,"rgba(200,230,255,0)");
+  ctx.beginPath(); ctx.arc(512,512,60,0,Math.PI*2); ctx.fillStyle=ig; ctx.fill();
+
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping;
+  t.minFilter=t.magFilter=THREE.LinearFilter;
+  topMat.uniforms.tMap.value=t; topMat.uniforms.hasTex.value=1.0;
+}
+
+/* ─────────────────────────────────────────────────
+   PROJECTION HELPERS
+───────────────────────────────────────────────── */
 function uvToLatLon(u, v) {
+  // PlaneGeometry UV: (0.5,0.5) = centre of disc = North Pole
   const sc = 1 / (Math.PI * 0.505);
   const x  = (u - 0.5) / sc;
   const y  = (v - 0.5) / sc;
-  const c  = Math.sqrt(x * x + y * y);
-  if (c === 0) return [90, 0];
+  const c  = Math.hypot(x, y);
+  if (c < 1e-9) return [90, 0];
   return [(Math.PI / 2 - c) * 180 / Math.PI, Math.atan2(x, -y) * 180 / Math.PI];
 }
 
-const tileCanvas  = document.createElement("canvas");
-tileCanvas.width  = 1024;
-tileCanvas.height = 1024;
-const tileCtx     = tileCanvas.getContext("2d");
-const mapTexture  = new THREE.CanvasTexture(tileCanvas);
-mapTexture.wrapS     = THREE.ClampToEdgeWrapping;
-mapTexture.wrapT     = THREE.ClampToEdgeWrapping;
-mapTexture.minFilter = THREE.LinearFilter;
-mapTexture.magFilter = THREE.LinearFilter;
-
-function loadImage(url) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload  = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src     = url;
-  });
-}
-
-async function loadDiscTexture() {
-  if (!window.MAPS_API_KEY || window.MAPS_API_KEY === "YOUR_GOOGLE_MAPS_API_KEY") {
-    drawPlaceholderDisc(); return;
-  }
-  const zoom = Math.min(state.mapZoom, 5);
-  const lat  = state.targetLat.toFixed(4);
-  const lon  = state.targetLon.toFixed(4);
-  const url  = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lon}&zoom=${zoom}&size=640x640&maptype=satellite&key=${window.MAPS_API_KEY}`;
-  const img  = await loadImage(url);
-  if (!img) { drawPlaceholderDisc(); return; }
-  tileCtx.clearRect(0, 0, 1024, 1024);
-  tileCtx.save();
-  tileCtx.beginPath();
-  tileCtx.arc(512, 512, 510, 0, Math.PI * 2);
-  tileCtx.clip();
-  tileCtx.drawImage(img, 0, 0, 1024, 1024);
-  tileCtx.restore();
-  mapTexture.needsUpdate   = true;
-  topMat.uniforms.tMap.value   = mapTexture;
-  topMat.uniforms.hasTex.value = 1.0;
-}
-
-function drawPlaceholderDisc() {
-  tileCtx.clearRect(0, 0, 1024, 1024);
-  const ocean = tileCtx.createRadialGradient(512, 512, 0, 512, 512, 512);
-  ocean.addColorStop(0,    "#1b6494");
-  ocean.addColorStop(0.55, "#0f4470");
-  ocean.addColorStop(0.85, "#082e52");
-  ocean.addColorStop(1,    "#041c38");
-  tileCtx.beginPath(); tileCtx.arc(512, 512, 510, 0, Math.PI * 2);
-  tileCtx.fillStyle = ocean; tileCtx.fill();
-  [
-    { cx:430, cy:340, rx:80, ry:110, rot:-0.3, c:"#3d7a3d" },
-    { cx:300, cy:440, rx:60, ry:80,  rot:0.2,  c:"#4a8a2a" },
-    { cx:590, cy:360, rx:90, ry:75,  rot:0.5,  c:"#5a8a3a" },
-    { cx:625, cy:495, rx:50, ry:45,  rot:-0.1, c:"#6aaa4a" },
-  ].forEach(({ cx, cy, rx, ry, rot, c }) => {
-    tileCtx.save(); tileCtx.translate(cx, cy); tileCtx.rotate(rot);
-    const g = tileCtx.createRadialGradient(0,0,0,0,0,Math.max(rx,ry));
-    g.addColorStop(0, c); g.addColorStop(1, c + "88");
-    tileCtx.beginPath(); tileCtx.ellipse(0,0,rx,ry,0,0,Math.PI*2);
-    tileCtx.fillStyle = g; tileCtx.fill(); tileCtx.restore();
-  });
-  const ice = tileCtx.createRadialGradient(512, 512, 0, 512, 512, 65);
-  ice.addColorStop(0, "rgba(230,245,255,0.95)"); ice.addColorStop(1, "rgba(200,230,255,0)");
-  tileCtx.beginPath(); tileCtx.arc(512, 512, 65, 0, Math.PI * 2);
-  tileCtx.fillStyle = ice; tileCtx.fill();
-  mapTexture.needsUpdate   = true;
-  topMat.uniforms.tMap.value   = mapTexture;
-  topMat.uniforms.hasTex.value = 1.0;
-}
-
-/* ═══════════════════════════════════════════════════════
-   5.  CAMERA
-═══════════════════════════════════════════════════════ */
-function updateCamera() {
-  const { camDist, camTheta, camPhi } = state;
-  camera.position.set(
-    camDist * Math.sin(camPhi) * Math.sin(camTheta),
-    camDist * Math.cos(camPhi),
-    camDist * Math.sin(camPhi) * Math.cos(camTheta)
-  );
+/* ─────────────────────────────────────────────────
+   CAMERA  — zoom changes camDist only, never texture
+───────────────────────────────────────────────── */
+function setCamera() {
+  const { camDist: d, camTheta: t, camPhi: p } = state;
+  camera.position.set(d*Math.sin(p)*Math.sin(t), d*Math.cos(p), d*Math.sin(p)*Math.cos(t));
   camera.lookAt(0, 0, 0);
   camera.updateProjectionMatrix();
 
-  /* Update HUD */
-  const altKm = Math.max(0, (camDist - DISC_RADIUS) * 637);
-  document.getElementById("coordAlt").textContent =
-    altKm > 9999
-      ? (altKm / 1000).toFixed(0) + ",000 km"
-      : altKm.toFixed(0) + " km";
+  const altKm = Math.max(0, (d - DISC_R) * 637);
+  el("coordAlt").textContent = altKm > 9999
+    ? (altKm/1000).toFixed(0) + ",000 km" : altKm.toFixed(0) + " km";
 
-  /* Scale bar */
-  const fov    = camera.fov * Math.PI / 180;
-  const kmPerPx = (altKm * 2 * Math.tan(fov / 2)) / window.innerHeight;
-  const targetKm = 1000;
-  const pxWidth  = Math.min(120, Math.max(40, targetKm / Math.max(kmPerPx, 1)));
-  const actualKm = Math.round(kmPerPx * pxWidth / 100) * 100 || targetKm;
-  document.getElementById("scaleLine").style.width  = pxWidth + "px";
-  document.getElementById("scaleLabel").textContent = actualKm.toLocaleString() + " km";
+  const fovR   = camera.fov * Math.PI / 180;
+  const kpp    = (altKm * 2 * Math.tan(fovR / 2)) / innerHeight;
+  const pw     = Math.min(120, Math.max(40, 1000 / Math.max(kpp, 0.1)));
+  const km     = Math.round(kpp * pw / 100) * 100 || 1000;
+  el("scaleLine").style.width  = pw + "px";
+  el("scaleLabel").textContent = km.toLocaleString() + " km";
 
-  /* Ice toast when near edge */
-  if (camPhi > Math.PI * 0.41 && camDist < 13) {
-    showIceToast();
-  }
+  if (p > Math.PI * 0.41 && d < 14) showIceToast();
 }
 
-/* ═══════════════════════════════════════════════════════
-   6.  MOUSE / TOUCH INPUT
-═══════════════════════════════════════════════════════ */
-canvas.addEventListener("mousedown", e => {
-  state.dragging  = true;
-  state.lastMouse = { x: e.clientX, y: e.clientY };
-});
-window.addEventListener("mouseup", () => { state.dragging = false; });
+const el = id => document.getElementById(id);
+
+/* ─────────────────────────────────────────────────
+   INPUT — mouse / wheel / touch
+───────────────────────────────────────────────── */
+canvas.addEventListener("mousedown", e => { state.drag=true; state.lastXY={x:e.clientX,y:e.clientY}; });
+window.addEventListener("mouseup",   () => state.drag=false);
 window.addEventListener("mousemove", e => {
-  if (!state.dragging) return;
-  const dx = e.clientX - state.lastMouse.x;
-  const dy = e.clientY - state.lastMouse.y;
-  state.camTheta -= dx * 0.005;
-  state.camPhi    = Math.max(0.12, Math.min(Math.PI * 0.49, state.camPhi + dy * 0.005));
-  state.lastMouse = { x: e.clientX, y: e.clientY };
-  updateCamera();
-
-  /* Update coordinate HUD from raycasting */
-  updateCoordsFromMouse(e.clientX, e.clientY);
+  if (!state.drag) return;
+  state.camTheta -= (e.clientX - state.lastXY.x) * 0.005;
+  state.camPhi    = Math.max(0.12, Math.min(Math.PI*0.49, state.camPhi + (e.clientY - state.lastXY.y) * 0.005));
+  state.lastXY    = { x:e.clientX, y:e.clientY };
+  setCamera();
+  hoverCoords(e.clientX, e.clientY);
 });
 
+// ZOOM: camera distance only — no texture reload
 canvas.addEventListener("wheel", e => {
   e.preventDefault();
-  state.camDist = Math.max(10.5, Math.min(80, state.camDist + e.deltaY * 0.03));
-  const nz = Math.min(5, Math.max(1, Math.round(22 - state.camDist)));
-  if (nz !== state.mapZoom) { state.mapZoom = nz; loadDiscTexture(); }
-  updateCamera();
+  state.camDist = Math.max(11, Math.min(80, state.camDist + e.deltaY * 0.03));
+  setCamera();
 }, { passive: false });
 
 canvas.addEventListener("touchstart", e => {
-  if (e.touches.length === 2) {
-    const dx = e.touches[0].clientX - e.touches[1].clientX;
-    const dy = e.touches[0].clientY - e.touches[1].clientY;
-    state.pinchDist = Math.sqrt(dx * dx + dy * dy);
-  } else {
-    state.dragging  = true;
-    state.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-  }
   e.preventDefault();
-}, { passive: false });
+  if (e.touches.length === 2) {
+    state.pinch = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+  } else { state.drag=true; state.lastXY={x:e.touches[0].clientX,y:e.touches[0].clientY}; }
+}, { passive:false });
 
 canvas.addEventListener("touchmove", e => {
-  if (e.touches.length === 2 && state.pinchDist !== null) {
-    const dx   = e.touches[0].clientX - e.touches[1].clientX;
-    const dy   = e.touches[0].clientY - e.touches[1].clientY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    state.camDist   = Math.max(10.5, Math.min(80, state.camDist + (state.pinchDist - dist) * 0.08));
-    state.pinchDist = dist;
-    updateCamera();
-  } else if (state.dragging && e.touches.length === 1) {
-    const dx = e.touches[0].clientX - state.lastMouse.x;
-    const dy = e.touches[0].clientY - state.lastMouse.y;
-    state.camTheta -= dx * 0.005;
-    state.camPhi    = Math.max(0.12, Math.min(Math.PI * 0.49, state.camPhi + dy * 0.005));
-    state.lastMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    updateCamera();
-  }
   e.preventDefault();
-}, { passive: false });
-canvas.addEventListener("touchend", () => { state.dragging = false; state.pinchDist = null; });
+  if (e.touches.length===2 && state.pinch!==null) {
+    const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+    state.camDist=Math.max(11,Math.min(80,state.camDist+(state.pinch-d)*0.08));
+    state.pinch=d; setCamera();
+  } else if (state.drag && e.touches.length===1) {
+    state.camTheta-=(e.touches[0].clientX-state.lastXY.x)*0.005;
+    state.camPhi=Math.max(0.12,Math.min(Math.PI*0.49,state.camPhi+(e.touches[0].clientY-state.lastXY.y)*0.005));
+    state.lastXY={x:e.touches[0].clientX,y:e.touches[0].clientY};
+    setCamera();
+  }
+}, { passive:false });
+canvas.addEventListener("touchend", () => { state.drag=false; state.pinch=null; });
 
-/* Double-click → Street View */
 canvas.addEventListener("dblclick", e => {
-  const rect  = canvas.getBoundingClientRect();
+  const hit = raycastDisc(e.clientX, e.clientY);
+  if (!hit) return;
+  const [lat,lon] = uvToLatLon(hit.uv.x, hit.uv.y);
+  if (lat < -60) { showIceToast(); return; }
+  openSV(lat, lon);
+  if (!state.hinted) { el("hintToast").classList.add("hidden"); state.hinted=true; }
+});
+
+function raycastDisc(cx, cy) {
+  const rect = canvas.getBoundingClientRect();
   const mouse = new THREE.Vector2(
-    ((e.clientX - rect.left) / rect.width)  * 2 - 1,
-    -((e.clientY - rect.top)  / rect.height) * 2 + 1
+    ((cx-rect.left)/rect.width )*2-1,
+    -((cy-rect.top )/rect.height)*2+1
   );
-  const ray  = new THREE.Raycaster();
+  const ray = new THREE.Raycaster();
   ray.setFromCamera(mouse, camera);
   const hits = ray.intersectObject(topMesh);
-  if (hits.length > 0) {
-    const [lat, lon] = uvToLatLon(hits[0].uv.x, hits[0].uv.y);
-    if (lat < -60) { showIceToast(); return; }
-    openStreetView(lat, lon);
-    if (!state.hintShown) {
-      document.getElementById("hintToast").classList.add("hidden");
-      state.hintShown = true;
-    }
-  }
-});
-
-function updateCoordsFromMouse(cx, cy) {
-  const rect  = canvas.getBoundingClientRect();
-  const mouse = new THREE.Vector2(
-    ((cx - rect.left) / rect.width)  * 2 - 1,
-    -((cy - rect.top)  / rect.height) * 2 + 1
-  );
-  const ray  = new THREE.Raycaster();
-  ray.setFromCamera(mouse, camera);
-  const hits = ray.intersectObject(topMesh);
-  if (hits.length > 0) {
-    const [lat, lon] = uvToLatLon(hits[0].uv.x, hits[0].uv.y);
-    state.targetLat  = lat;
-    state.targetLon  = lon;
-    document.getElementById("coordLat").textContent =
-      Math.abs(lat).toFixed(3) + "°" + (lat >= 0 ? "N" : "S");
-    document.getElementById("coordLon").textContent =
-      Math.abs(lon).toFixed(3) + "°" + (lon >= 0 ? "E" : "W");
-  }
+  return hits.length ? hits[0] : null;
 }
 
-/* ═══════════════════════════════════════════════════════
-   7.  UI BUTTONS
-═══════════════════════════════════════════════════════ */
-
-/* Hamburger → side panel */
-document.getElementById("menuBtn").addEventListener("click", () => {
-  document.getElementById("sidePanel").classList.toggle("panel-open");
-  document.getElementById("sidePanel").classList.toggle("panel-closed");
-  document.getElementById("panelOverlay").classList.toggle("visible");
-});
-document.getElementById("panelClose").addEventListener("click", closePanel);
-document.getElementById("panelOverlay").addEventListener("click", closePanel);
-function closePanel() {
-  document.getElementById("sidePanel").classList.remove("panel-open");
-  document.getElementById("sidePanel").classList.add("panel-closed");
-  document.getElementById("panelOverlay").classList.remove("visible");
+function hoverCoords(cx, cy) {
+  const hit = raycastDisc(cx, cy);
+  if (!hit) return;
+  const [lat,lon] = uvToLatLon(hit.uv.x, hit.uv.y);
+  el("coordLat").textContent = Math.abs(lat).toFixed(3)+"°"+(lat>=0?"N":"S");
+  el("coordLon").textContent = Math.abs(lon).toFixed(3)+"°"+(lon>=0?"E":"W");
 }
 
-/* Panel nav */
-document.getElementById("navDisc").addEventListener("click", () => {
-  closeStreetView();
-  setNavActive("navDisc");
-  closePanel();
+/* ─────────────────────────────────────────────────
+   UI PANEL & TOGGLES
+───────────────────────────────────────────────── */
+el("menuBtn").addEventListener("click", () => {
+  el("sidePanel").classList.toggle("panel-open");
+  el("sidePanel").classList.toggle("panel-closed");
+  el("panelOverlay").classList.toggle("visible");
 });
-document.getElementById("navStreet").addEventListener("click", () => {
-  openStreetView(state.targetLat, state.targetLon);
-  setNavActive("navStreet");
-  closePanel();
-});
-function setNavActive(id) {
-  document.querySelectorAll(".panel-nav-item").forEach(b => b.classList.remove("active"));
-  document.getElementById(id).classList.add("active");
-}
+const closePanel = () => {
+  el("sidePanel").classList.replace("panel-open","panel-closed");
+  el("panelOverlay").classList.remove("visible");
+};
+el("panelClose").addEventListener("click",   closePanel);
+el("panelOverlay").addEventListener("click", closePanel);
 
-/* Toggles */
-function bindToggle(id, cb) {
-  const el = document.getElementById(id);
-  el.addEventListener("click", () => {
-    el.classList.toggle("active");
-    cb(el.classList.contains("active"));
-  });
-}
-bindToggle("toggleNight", on => { state.nightMode = on; });
-bindToggle("toggleWaterfall", on => {
-  state.waterfallOn = on;
-  waterfall.visible = on;
-});
-bindToggle("toggleIce", on => { wall.visible = on; });
-bindToggle("toggleSatellite", on => {
-  topMat.uniforms.hasTex.value = on ? 1.0 : 0.0;
-});
+el("navDisc").addEventListener("click",   () => { closeSV(); setNav("navDisc");   closePanel(); });
+el("navStreet").addEventListener("click", () => { openSV(0,0);  setNav("navStreet"); closePanel(); });
+const setNav = id => document.querySelectorAll(".panel-nav-item").forEach(b => b.classList.toggle("active", b.id===id));
 
-/* Toolbar buttons */
-document.getElementById("zoomIn").addEventListener("click", () => {
-  state.camDist = Math.max(10.5, state.camDist - 2.5);
-  updateCamera(); loadDiscTexture();
-});
-document.getElementById("zoomOut").addEventListener("click", () => {
-  state.camDist = Math.min(80, state.camDist + 2.5);
-  updateCamera(); loadDiscTexture();
-});
-document.getElementById("btnReset").addEventListener("click", () => {
-  state.camDist  = 22;
-  state.camTheta = Math.PI / 4;
-  state.camPhi   = Math.PI / 3;
-  updateCamera(); loadDiscTexture();
-});
-document.getElementById("btnCompass").addEventListener("click", () => {
-  state.camTheta = Math.PI / 4;
-  updateCamera();
-});
+const toggle = (id, fn) => el(id).addEventListener("click", () => { el(id).classList.toggle("active"); fn(el(id).classList.contains("active")); });
+toggle("toggleNight",     on => state.nightMode = on);
+toggle("toggleWaterfall", on => wfMesh.visible  = on);
+toggle("toggleIce",       on => iceGroup.visible = on);
+toggle("toggleSatellite", on => topMat.uniforms.hasTex.value = on ? 1 : 0);
 
-/* ═══════════════════════════════════════════════════════
-   8.  SEARCH
-═══════════════════════════════════════════════════════ */
-const searchInput   = document.getElementById("searchInput");
-const searchResults = document.getElementById("searchResults");
+el("zoomIn") .addEventListener("click", () => { state.camDist=Math.max(11,state.camDist-2.5); setCamera(); });
+el("zoomOut").addEventListener("click", () => { state.camDist=Math.min(80,state.camDist+2.5); setCamera(); });
+el("btnReset").addEventListener("click", () => {
+  Object.assign(state,{camDist:24,camTheta:Math.PI/4,camPhi:Math.PI/3});
+  setCamera();
+  loadMapsTexture(30, 15, 0);  // reload world overview
+});
+el("btnCompass").addEventListener("click", () => { state.camTheta=Math.PI/4; setCamera(); });
 
-document.getElementById("searchBtn").addEventListener("click", doSearch);
-searchInput.addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+/* ─────────────────────────────────────────────────
+   SEARCH
+───────────────────────────────────────────────── */
+const sInput   = el("searchInput");
+const sResults = el("searchResults");
+
+el("searchBtn").addEventListener("click", doSearch);
+sInput.addEventListener("keydown", e => e.key==="Enter" && doSearch());
 
 async function doSearch() {
-  const q = searchInput.value.trim();
-  if (!q) return;
-  if (!window.MAPS_API_KEY || window.MAPS_API_KEY === "YOUR_GOOGLE_MAPS_API_KEY") {
-    showFallbackSearch(q); return;
-  }
+  const q = sInput.value.trim(); if (!q) return;
+  if (!window.MAPS_API_KEY || window.MAPS_API_KEY==="YOUR_GOOGLE_MAPS_API_KEY") { fallback(q); return; }
   try {
-    const url  = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&key=${window.MAPS_API_KEY}`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (data.status === "REQUEST_DENIED") {
-      // API key not authorised for Geocoding — fall back to demo places
-      console.warn("Geocoding API denied:", data.error_message);
-      showFallbackSearch(q); return;
-    }
-    if (data.results?.length) showSearchResults(data.results.slice(0, 5));
-    else {
-      searchResults.innerHTML = "<div class='result-item'><span class='result-text'>No results found.</span></div>";
-      searchResults.classList.add("open");
-    }
-  } catch(err) {
-    // Network error or CORS block — fall back to demo places
-    console.warn("Geocoding fetch failed:", err);
-    showFallbackSearch(q);
-  }
+    const data = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&key=${window.MAPS_API_KEY}`).then(r=>r.json());
+    if (data.status==="REQUEST_DENIED"||data.status==="ERROR") { fallback(q); return; }
+    data.results?.length ? showResults(data.results.slice(0,5)) : (sResults.innerHTML="<div class='result-item'><span class='result-text'>No results.</span></div>",sResults.classList.add("open"));
+  } catch { fallback(q); }
 }
 
-/* Fallback for no-API-key demo */
-const demoPlaces = [
-  { name: "London, UK",          lat: 51.505,   lon: -0.09 },
-  { name: "New York, USA",       lat: 40.713,   lon: -74.006 },
-  { name: "Tokyo, Japan",        lat: 35.683,   lon: 139.767 },
-  { name: "Sydney, Australia",   lat: -33.868,  lon: 151.209 },
-  { name: "Paris, France",       lat: 48.857,   lon: 2.352 },
-  { name: "Cairo, Egypt",        lat: 30.033,   lon: 31.233 },
-  { name: "North Pole",          lat: 89.9,     lon: 0 },
-  { name: "Antarctica Ice Wall", lat: -70,      lon: 0 },
+const DEMO = [
+  {name:"London, UK",          lat:51.505, lng:-0.09},
+  {name:"New York, USA",       lat:40.713, lng:-74.006},
+  {name:"Tokyo, Japan",        lat:35.683, lng:139.767},
+  {name:"Sydney, Australia",   lat:-33.868,lng:151.209},
+  {name:"Paris, France",       lat:48.857, lng:2.352},
+  {name:"Cairo, Egypt",        lat:30.033, lng:31.233},
+  {name:"North Pole",          lat:89.9,   lng:0},
+  {name:"Antarctica Ice Wall", lat:-70,    lng:0},
 ];
-function showFallbackSearch(q) {
-  const filtered = demoPlaces.filter(p => p.name.toLowerCase().includes(q.toLowerCase()));
-  const results  = filtered.length ? filtered : demoPlaces;
-  showSearchResults(results.map(p => ({
-    formatted_address: p.name,
-    geometry: { location: { lat: p.lat, lng: p.lon } },
-  })));
+function fallback(q) {
+  const f = DEMO.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+  showResults((f.length?f:DEMO).map(p=>({formatted_address:p.name,geometry:{location:{lat:p.lat,lng:p.lng}}})));
 }
 
-function showSearchResults(results) {
-  searchResults.innerHTML = "";
-  results.forEach(r => {
-    const li  = document.createElement("div");
-    li.className = "result-item";
-    li.innerHTML = `
-      <svg class="result-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/>
-      </svg>
-      <span class="result-text">${r.formatted_address}</span>`;
-    li.addEventListener("click", () => {
-      const { lat, lng } = r.geometry.location;
-      flyTo(lat, lng);
-      searchResults.classList.remove("open");
-      searchInput.value = r.formatted_address;
+function showResults(res) {
+  sResults.innerHTML="";
+  res.forEach(r=>{
+    const d=document.createElement("div"); d.className="result-item";
+    d.innerHTML=`<svg class="result-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg><span class="result-text">${r.formatted_address}</span>`;
+    d.addEventListener("click",()=>{
+      const {lat,lng}=r.geometry.location;
+      flyTo(lat,lng); sResults.classList.remove("open"); sInput.value=r.formatted_address;
     });
-    searchResults.appendChild(li);
+    sResults.appendChild(d);
   });
-  searchResults.classList.add("open");
+  sResults.classList.add("open");
+}
+document.addEventListener("click", e => { if(!e.target.closest("#searchBar")) sResults.classList.remove("open"); });
+
+function flyTo(lat,lon) {
+  el("coordLat").textContent=Math.abs(lat).toFixed(3)+"°"+(lat>=0?"N":"S");
+  el("coordLon").textContent=Math.abs(lon).toFixed(3)+"°"+(lon>=0?"E":"W");
+  // Load a zoomed satellite view of the destination — zoom=4 shows a region
+  loadMapsTexture(lat, lon, 4);
 }
 
-document.addEventListener("click", e => {
-  if (!e.target.closest("#searchBar")) searchResults.classList.remove("open");
-});
-
-function flyTo(lat, lon) {
-  state.targetLat = lat;
-  state.targetLon = lon;
-  document.getElementById("coordLat").textContent = Math.abs(lat).toFixed(3) + "°" + (lat >= 0 ? "N" : "S");
-  document.getElementById("coordLon").textContent = Math.abs(lon).toFixed(3) + "°" + (lon >= 0 ? "E" : "W");
-  loadDiscTexture();
-}
-
-/* ═══════════════════════════════════════════════════════
-   9.  STREET VIEW
-═══════════════════════════════════════════════════════ */
-let mapsLoaded   = false;
-let streetPanorama = null;
-
-function ensureMapsJs(cb) {
-  if (mapsLoaded) { cb(); return; }
-  if (!window.MAPS_API_KEY || window.MAPS_API_KEY === "YOUR_GOOGLE_MAPS_API_KEY") {
-    alert("Add your Google Maps API key to use Street View."); return;
-  }
-  const s   = document.createElement("script");
-  s.src     = `https://maps.googleapis.com/maps/api/js?key=${window.MAPS_API_KEY}&v=weekly`;
-  s.async   = true;
-  s.onload  = () => { mapsLoaded = true; cb(); };
+/* ─────────────────────────────────────────────────
+   STREET VIEW
+───────────────────────────────────────────────── */
+let mapsJsLoaded=false, svPano=null;
+function loadMapsJs(cb) {
+  if (mapsJsLoaded) { cb(); return; }
+  if (!window.MAPS_API_KEY||window.MAPS_API_KEY==="YOUR_GOOGLE_MAPS_API_KEY") { alert("Add your API key to use Street View."); return; }
+  const s=document.createElement("script"); s.async=true;
+  s.src=`https://maps.googleapis.com/maps/api/js?key=${window.MAPS_API_KEY}&v=weekly`;
+  s.onload=()=>{ mapsJsLoaded=true; cb(); };
   document.head.appendChild(s);
 }
-
-function openStreetView(lat, lon) {
-  state.streetMode = true;
-  document.getElementById("streetOverlay").classList.remove("hidden");
-  document.getElementById("streetCoords").textContent =
-    `${Math.abs(lat).toFixed(4)}°${lat >= 0 ? "N" : "S"}, ${Math.abs(lon).toFixed(4)}°${lon >= 0 ? "E" : "W"}`;
-  setNavActive("navStreet");
-
-  ensureMapsJs(() => {
-    const pos = { lat, lng: lon };
-    if (!streetPanorama) {
-      streetPanorama = new google.maps.StreetViewPanorama(
-        document.getElementById("streetMap"),
-        { position: pos, pov: { heading: 34, pitch: 10 }, zoom: 1, addressControl: false, fullscreenControl: false }
-      );
-    } else {
-      streetPanorama.setPosition(pos);
-    }
+function openSV(lat,lon) {
+  state.street=true;
+  el("streetOverlay").classList.remove("hidden");
+  el("streetCoords").textContent=`${Math.abs(lat).toFixed(4)}°${lat>=0?"N":"S"}, ${Math.abs(lon).toFixed(4)}°${lon>=0?"E":"W"}`;
+  setNav("navStreet");
+  loadMapsJs(()=>{
+    const pos={lat,lng:lon};
+    svPano ? svPano.setPosition(pos) : (svPano=new google.maps.StreetViewPanorama(el("streetMap"),{position:pos,pov:{heading:34,pitch:10},zoom:1,addressControl:false,fullscreenControl:false}));
   });
 }
+function closeSV() { state.street=false; el("streetOverlay").classList.add("hidden"); setNav("navDisc"); }
+el("closeStreet").addEventListener("click", closeSV);
 
-function closeStreetView() {
-  state.streetMode = false;
-  document.getElementById("streetOverlay").classList.add("hidden");
-  setNavActive("navDisc");
-}
-document.getElementById("closeStreet").addEventListener("click", closeStreetView);
-
-/* ═══════════════════════════════════════════════════════
-   10. TOASTS
-═══════════════════════════════════════════════════════ */
-let iceToastTimer = null;
+/* ─────────────────────────────────────────────────
+   TOASTS
+───────────────────────────────────────────────── */
+let iceTmr=null;
 function showIceToast() {
-  const el = document.getElementById("iceToast");
-  el.classList.remove("hidden", "out");
-  clearTimeout(iceToastTimer);
-  iceToastTimer = setTimeout(() => {
-    el.classList.add("out");
-    setTimeout(() => el.classList.add("hidden"), 350);
-  }, 3500);
+  const t=el("iceToast"); t.classList.remove("hidden","out"); clearTimeout(iceTmr);
+  iceTmr=setTimeout(()=>{ t.classList.add("out"); setTimeout(()=>t.classList.add("hidden"),350); },3500);
 }
+setTimeout(()=>{
+  const h=el("hintToast");
+  if (h&&!h.classList.contains("hidden")){ h.classList.add("out"); setTimeout(()=>h.classList.add("hidden"),350); }
+},8000);
 
-/* Hide hint after 7 seconds */
-setTimeout(() => {
-  const h = document.getElementById("hintToast");
-  if (!h.classList.contains("hidden")) {
-    h.classList.add("out");
-    setTimeout(() => h.classList.add("hidden"), 350);
-  }
-}, 8000);
-
-/* ═══════════════════════════════════════════════════════
-   11. NIGHT TRANSITION
-═══════════════════════════════════════════════════════ */
+/* ─────────────────────────────────────────────────
+   NIGHT TRANSITION
+───────────────────────────────────────────────── */
 function tickNight() {
-  const target  = state.nightMode ? 1 : 0;
-  const current = topMat.uniforms.nightAmt.value;
-  topMat.uniforms.nightAmt.value += (target - current) * 0.025;
-  ambient.intensity  = 0.7  - topMat.uniforms.nightAmt.value * 0.55;
-  sun.intensity      = 2.0  - topMat.uniforms.nightAmt.value * 1.9;
+  const tgt=state.nightMode?1:0, cur=topMat.uniforms.nightAmt.value;
+  topMat.uniforms.nightAmt.value += (tgt-cur)*0.025;
+  ambientLight.intensity = 0.75 - topMat.uniforms.nightAmt.value*0.58;
+  sun.intensity          = 2.20 - topMat.uniforms.nightAmt.value*2.0;
 }
 
-/* ═══════════════════════════════════════════════════════
-   12. RENDER LOOP
-═══════════════════════════════════════════════════════ */
+/* ─────────────────────────────────────────────────
+   RENDER LOOP
+───────────────────────────────────────────────── */
 const clock = new THREE.Clock();
-
 function animate() {
   requestAnimationFrame(animate);
-  const t = clock.getElapsedTime();
-  wfMat.uniforms.time.value = t;
+  wfMat.uniforms.time.value = clock.getElapsedTime();
   tickNight();
-  if (!state.dragging && !state.streetMode) {
-    state.camTheta += 0.00006;
+  if (!state.drag && !state.street) {
+    state.camTheta += 0.00005;
     camera.position.set(
-      state.camDist * Math.sin(state.camPhi) * Math.sin(state.camTheta),
-      state.camDist * Math.cos(state.camPhi),
-      state.camDist * Math.sin(state.camPhi) * Math.cos(state.camTheta)
+      state.camDist*Math.sin(state.camPhi)*Math.sin(state.camTheta),
+      state.camDist*Math.cos(state.camPhi),
+      state.camDist*Math.sin(state.camPhi)*Math.cos(state.camTheta)
     );
-    camera.lookAt(0, 0, 0);
+    camera.lookAt(0,0,0);
   }
-  renderer.render(scene, camera);
+  renderer.render(scene,camera);
 }
 
-/* ═══════════════════════════════════════════════════════
-   13. RESIZE
-═══════════════════════════════════════════════════════ */
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+window.addEventListener("resize",()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
 });
 
-/* ═══════════════════════════════════════════════════════
-   14. INIT
-═══════════════════════════════════════════════════════ */
-const LOADER_MSGS = [
-  "Initialising flat projection…",
-  "Loading azimuthal equidistant map…",
-  "Placing Antarctic ice wall…",
-  "Animating waterfalls…",
-  "Connecting to satellite imagery…",
-  "Almost there…",
-];
+/* ─────────────────────────────────────────────────
+   INIT
+───────────────────────────────────────────────── */
+const MSGS=["Initialising flat projection…","Rendering azimuthal equidistant map…","Carving Antarctic ice mountains…","Shaping bedrock underside…","Connecting to satellite imagery…","Almost there…"];
 
 (async function init() {
-  const fill   = document.getElementById("loaderFill");
-  const status = document.getElementById("loaderStatus");
-  let   pct    = 0;
-  let   msgIdx = 0;
+  setCamera();
+  const fill=el("loaderFill"), status=el("loaderStatus");
+  let pct=0, mi=0;
+  const tick=setInterval(()=>{ pct=Math.min(90,pct+Math.random()*18); fill.style.width=pct+"%"; if(mi<MSGS.length-1)status.textContent=MSGS[++mi]; },300);
 
-  const tick = setInterval(() => {
-    pct += Math.random() * 20;
-    if (pct > 90) pct = 90;
-    fill.style.width = pct + "%";
-    if (msgIdx < LOADER_MSGS.length - 1) status.textContent = LOADER_MSGS[++msgIdx];
-  }, 300);
+  buildPlaceholder();
 
-  drawPlaceholderDisc();
-  await loadDiscTexture();
+  // Load world map at zoom=0 (entire world), centered roughly over central Asia/Europe
+  // so the AE projection disc shows continents spread well from north pole
+  loadMapsTexture(30, 15, 0);
 
   clearInterval(tick);
-  fill.style.width = "100%";
-  status.textContent = "Ready.";
-  await new Promise(r => setTimeout(r, 350));
-
-  document.getElementById("loader").classList.add("out");
-  setTimeout(() => { document.getElementById("loader").style.display = "none"; }, 750);
-
+  fill.style.width="100%"; status.textContent="Ready.";
+  await new Promise(r=>setTimeout(r,400));
+  el("loader").classList.add("out");
+  setTimeout(()=>el("loader").style.display="none",750);
   animate();
 })();
