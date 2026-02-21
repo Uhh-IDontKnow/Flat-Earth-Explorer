@@ -16,54 +16,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── PRE-PULL the Azure Static Web Apps container image with retries ──
-      # MCR (Microsoft Container Registry) has intermittent 401 errors on
-      # anonymous pulls. Pulling the image manually first with retry logic
-      # prevents the deploy action from failing on a transient MCR outage.
-      - name: Pre-pull Azure Static Web Apps container (with retry)
-        run: |
-          echo "Attempting to pull Azure Static Web Apps container..."
-          for attempt in 1 2 3 4 5; do
-            echo "Attempt $attempt of 5..."
-            if docker pull mcr.microsoft.com/appsvc/staticappsclient:stable; then
-              echo "✅ Pull succeeded on attempt $attempt"
-              break
-            fi
-            if [ "$attempt" -eq 5 ]; then
-              echo "❌ All 5 attempts failed. MCR may be experiencing an outage."
-              exit 1
-            fi
-            echo "Waiting 20 seconds before retry..."
-            sleep 20
-          done
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       # ── SECURITY: Inject Google Maps API key from GitHub Secret ──
-      # The key is stored in GitHub Secrets (never committed to the repo).
-      # This step replaces the placeholder in index.html at build time,
-      # so your actual API key is never visible in the codebase.
       - name: Inject Google Maps API Key
-        run: |
-          sed -i 's|YOUR_GOOGLE_MAPS_API_KEY|${{ secrets.GOOGLE_MAPS_API_KEY }}|g' src/index.html
-        shell: bash
+        run: sed -i 's|YOUR_GOOGLE_MAPS_API_KEY|${{ secrets.GOOGLE_MAPS_API_KEY }}|g' src/index.html
+
+      # ── DEPLOY via SWA CLI (no Docker, no MCR, no flakiness) ──
+      - name: Install Azure SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
 
       - name: Deploy to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          action: "upload"
-          app_location: "/src"
-          api_location: ""
-          output_location: ""
+        run: swa deploy ./src --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env production
 
   close_pull_request:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Close Pull Request
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          action: "close"
+          node-version: '20'
+
+      - name: Install Azure SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
+
+      - name: Close staging environment
+        run: swa deploy --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env close
