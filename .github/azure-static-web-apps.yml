@@ -14,7 +14,28 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      # ── PRE-PULL the Azure Static Web Apps container image with retries ──
+      # MCR (Microsoft Container Registry) has intermittent 401 errors on
+      # anonymous pulls. Pulling the image manually first with retry logic
+      # prevents the deploy action from failing on a transient MCR outage.
+      - name: Pre-pull Azure Static Web Apps container (with retry)
+        run: |
+          echo "Attempting to pull Azure Static Web Apps container..."
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt of 5..."
+            if docker pull mcr.microsoft.com/appsvc/staticappsclient:stable; then
+              echo "✅ Pull succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "❌ All 5 attempts failed. MCR may be experiencing an outage."
+              exit 1
+            fi
+            echo "Waiting 20 seconds before retry..."
+            sleep 20
+          done
 
       # ── SECURITY: Inject Google Maps API key from GitHub Secret ──
       # The key is stored in GitHub Secrets (never committed to the repo).
