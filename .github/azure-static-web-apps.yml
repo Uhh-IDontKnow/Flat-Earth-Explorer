@@ -22,8 +22,38 @@ jobs:
           node-version: '20'
 
       # ── SECURITY: Inject Google Maps API key from GitHub Secret ──
+      # Uses Node.js for reliable string replacement (no sed escaping issues).
+      # Exits with an error if the placeholder is not found, so you know
+      # immediately if something is wrong rather than deploying silently broken.
       - name: Inject Google Maps API Key
-        run: sed -i 's|YOUR_GOOGLE_MAPS_API_KEY|${{ secrets.GOOGLE_MAPS_API_KEY }}|g' src/index.html
+        env:
+          MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = './src/index.html';
+            const placeholder = 'YOUR_GOOGLE_MAPS_API_KEY';
+            const apiKey = process.env.MAPS_API_KEY;
+
+            if (!apiKey) {
+              console.error('❌ ERROR: GOOGLE_MAPS_API_KEY secret is empty or not set.');
+              console.error('   Go to: GitHub repo → Settings → Secrets and variables → Actions');
+              console.error('   Add a secret named exactly: GOOGLE_MAPS_API_KEY');
+              process.exit(1);
+            }
+
+            let html = fs.readFileSync(path, 'utf8');
+
+            if (!html.includes(placeholder)) {
+              console.error('❌ ERROR: Placeholder text not found in index.html.');
+              console.error('   Expected to find: ' + placeholder);
+              process.exit(1);
+            }
+
+            const replaced = html.replaceAll(placeholder, apiKey);
+            fs.writeFileSync(path, replaced, 'utf8');
+            console.log('✅ API key injected successfully into index.html');
+          "
 
       # ── DEPLOY via SWA CLI (no Docker, no MCR, no flakiness) ──
       - name: Install Azure SWA CLI
