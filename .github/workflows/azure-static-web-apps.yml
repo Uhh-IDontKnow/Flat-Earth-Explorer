@@ -21,7 +21,6 @@ jobs:
         with:
           node-version: '20'
 
-      # ── BUILD: Copy src → dist and inject API key ──
       - name: Build dist with injected API key
         env:
           MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
@@ -51,45 +50,37 @@ jobs:
             let html = fs.readFileSync(htmlPath, 'utf8');
             const count = (html.match(/YOUR_GOOGLE_MAPS_API_KEY/g) || []).length;
             if (count === 0) {
-              console.error('ERROR: Placeholder not found in index.html — check the file in src/');
+              console.error('ERROR: Placeholder not found in index.html');
               process.exit(1);
             }
             html = html.replaceAll('YOUR_GOOGLE_MAPS_API_KEY', apiKey);
             fs.writeFileSync(htmlPath, html, 'utf8');
-            console.log('Injected key into ' + count + ' location(s) in dist/index.html');
 
-            // Confirm no placeholders remain
-            const verify = fs.readFileSync(htmlPath, 'utf8');
-            if (verify.includes('YOUR_GOOGLE_MAPS_API_KEY')) {
+            if (fs.readFileSync(htmlPath, 'utf8').includes('YOUR_GOOGLE_MAPS_API_KEY')) {
               console.error('ERROR: Placeholder still present after replacement');
               process.exit(1);
             }
+
             const preview = apiKey.substring(0, 6) + '...' + apiKey.slice(-4);
-            console.log('SUCCESS. Key preview: ' + preview);
+            console.log('SUCCESS. Key injected. Preview: ' + preview);
           "
 
-      # ── VERIFY: Print the exact deployed line so you can confirm in logs ──
       - name: Verify dist/index.html
         run: |
           echo "=== MAPS_API_KEY line in dist/index.html ==="
           grep "MAPS_API_KEY" ./dist/index.html
           echo ""
-          echo "=== All files in ./dist ==="
+          echo "=== Files in ./dist ==="
           ls -la ./dist/
 
-      # ── DEPLOY: Use the Azure action pointed at ./dist ──
-      # app_location is set to dist (the folder we built into).
-      # skip_app_build tells the action not to run its own build step
-      # which would overwrite our injected files with the originals from src.
+      - name: Install SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
+
+      # Deploy using env var for token — avoids any CLI config file ambiguity
       - name: Deploy to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          action: upload
-          app_location: dist
-          skip_app_build: true
-          output_location: ""
+        env:
+          SWA_CLI_DEPLOYMENT_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+        run: swa deploy ./dist --env production
 
   close_pull_request:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
@@ -99,9 +90,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Close Pull Request
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          action: close
+          node-version: '20'
+
+      - name: Install SWA CLI
+        run: npm install -g @azure/static-web-apps-cli
+
+      - name: Close staging environment
+        env:
+          SWA_CLI_DEPLOYMENT_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+        run: swa deploy --env close
