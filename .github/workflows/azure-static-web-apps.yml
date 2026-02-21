@@ -21,17 +21,18 @@ jobs:
         with:
           node-version: '20'
 
-      # ── SECURITY: Write API key into a separate JS file ──
-      # Rather than string-replacing inside index.html (which the SWA CLI
-      # might re-read from git), we write the key into its own file that
-      # index.html loads as a <script src>. This is reliable regardless of
-      # how the deploy tool reads files.
-      - name: Write API key config file
+      # ── BUILD: Copy src to a clean build folder and inject API key ──
+      # We deploy from ./build (not ./src) so the SWA CLI only sees our
+      # prepared output. This avoids any issue with the CLI re-reading
+      # files from git rather than from the modified filesystem.
+      - name: Build and inject API key
         env:
           MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
         run: |
           node -e "
             const fs = require('fs');
+            const path = require('path');
+
             const apiKey = process.env.MAPS_API_KEY;
 
             if (!apiKey) {
@@ -40,42 +41,61 @@ jobs:
               process.exit(1);
             }
 
-            // Write key into its own JS file
-            const keyFile = './src/config.js';
-            fs.writeFileSync(keyFile, 'window.MAPS_API_KEY = \"' + apiKey + '\";\n', 'utf8');
-            console.log('✅ config.js written successfully.');
+            // Copy ./src to ./build
+            function copyDir(src, dest) {
+              fs.mkdirSync(dest, { recursive: true });
+              for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                const srcPath = path.join(src, entry.name);
+                const destPath = path.join(dest, entry.name);
+                if (entry.isDirectory()) {
+                  copyDir(srcPath, destPath);
+                } else {
+                  fs.copyFileSync(srcPath, destPath);
+                }
+              }
+            }
+            copyDir('./src', './build');
+            console.log('✅ Copied ./src to ./build');
 
-            // Verify the file exists and has content
-            const written = fs.readFileSync(keyFile, 'utf8');
-            if (!written.includes(apiKey)) {
-              console.error('❌ Verification failed — key not found in written file.');
+            // Inject API key into build/index.html
+            const htmlPath = './build/index.html';
+            const placeholder = 'YOUR_GOOGLE_MAPS_API_KEY';
+            let html = fs.readFileSync(htmlPath, 'utf8');
+
+            if (!html.includes(placeholder)) {
+              console.error('❌ Placeholder not found in index.html');
               process.exit(1);
             }
-            console.log('✅ Verification passed — key confirmed in config.js.');
 
-            // Print first/last 4 chars of key so you can visually confirm in logs
+            fs.writeFileSync(htmlPath, html.replaceAll(placeholder, apiKey), 'utf8');
+            console.log('✅ API key injected into build/index.html');
+
+            // Verify
+            const built = fs.readFileSync(htmlPath, 'utf8');
+            if (built.includes(placeholder)) {
+              console.error('❌ Placeholder still present after replacement');
+              process.exit(1);
+            }
+
             const preview = apiKey.substring(0, 4) + '...' + apiKey.slice(-4);
-            console.log('   Key preview (first/last 4 chars): ' + preview);
+            console.log('✅ Verified. Key preview: ' + preview);
           "
 
-      # ── VERIFY: Confirm files are ready before deploying ──
-      - name: Verify src files before deploy
+      # ── VERIFY: Show what is about to be deployed ──
+      - name: Verify build folder
         run: |
-          echo "── Files in ./src ──"
-          ls -la ./src/
+          echo "── Files in ./build ──"
+          ls -la ./build/
           echo ""
-          echo "── config.js content ──"
-          cat ./src/config.js
-          echo ""
-          echo "── Checking index.html still references config.js ──"
-          grep -n "config.js" ./src/index.html && echo "✅ config.js reference found in index.html" || echo "⚠️  config.js not referenced in index.html — see note below"
+          echo "── API key line in build/index.html ──"
+          grep "MAPS_API_KEY" ./build/index.html
 
-      # ── DEPLOY via SWA CLI — pure Node.js, zero Docker ──
+      # ── DEPLOY from ./build, not ./src ──
       - name: Install SWA CLI
         run: npm install -g @azure/static-web-apps-cli
 
-      - name: Deploy to Azure Static Web Apps
-        run: swa deploy ./src --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env production
+      - name: Deploy
+        run: swa deploy ./build --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env production
 
   close_pull_request:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
