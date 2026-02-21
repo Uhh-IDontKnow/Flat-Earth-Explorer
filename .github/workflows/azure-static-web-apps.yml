@@ -21,8 +21,8 @@ jobs:
         with:
           node-version: '20'
 
-      # ── SECURITY: Inject API key and build to ./dist ──
-      - name: Build dist folder with injected API key
+      # ── BUILD: Copy src → dist and inject API key ──
+      - name: Build dist with injected API key
         env:
           MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
         run: |
@@ -36,7 +36,6 @@ jobs:
               process.exit(1);
             }
 
-            // Copy everything from ./src into ./dist
             function copyDir(src, dest) {
               fs.mkdirSync(dest, { recursive: true });
               for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -46,43 +45,51 @@ jobs:
               }
             }
             copyDir('./src', './dist');
+            console.log('Copied ./src to ./dist');
 
-            // Replace placeholder in dist/index.html
             const htmlPath = './dist/index.html';
             let html = fs.readFileSync(htmlPath, 'utf8');
             const count = (html.match(/YOUR_GOOGLE_MAPS_API_KEY/g) || []).length;
-            console.log('Placeholder occurrences found: ' + count);
             if (count === 0) {
-              console.error('ERROR: Placeholder YOUR_GOOGLE_MAPS_API_KEY not found in index.html');
+              console.error('ERROR: Placeholder not found in index.html — check the file in src/');
               process.exit(1);
             }
             html = html.replaceAll('YOUR_GOOGLE_MAPS_API_KEY', apiKey);
             fs.writeFileSync(htmlPath, html, 'utf8');
-            console.log('Replaced ' + count + ' occurrence(s).');
+            console.log('Injected key into ' + count + ' location(s) in dist/index.html');
+
+            // Confirm no placeholders remain
+            const verify = fs.readFileSync(htmlPath, 'utf8');
+            if (verify.includes('YOUR_GOOGLE_MAPS_API_KEY')) {
+              console.error('ERROR: Placeholder still present after replacement');
+              process.exit(1);
+            }
+            const preview = apiKey.substring(0, 6) + '...' + apiKey.slice(-4);
+            console.log('SUCCESS. Key preview: ' + preview);
           "
 
-      # ── CRITICAL: Print the exact key line so we can verify in logs ──
-      - name: Show injected key line (first+last 6 chars visible)
+      # ── VERIFY: Print the exact deployed line so you can confirm in logs ──
+      - name: Verify dist/index.html
         run: |
           echo "=== MAPS_API_KEY line in dist/index.html ==="
           grep "MAPS_API_KEY" ./dist/index.html
           echo ""
-          echo "=== Files in ./dist ==="
+          echo "=== All files in ./dist ==="
           ls -la ./dist/
-          echo ""
-          echo "=== Checking for any remaining placeholders ==="
-          grep -c "YOUR_GOOGLE_MAPS_API_KEY" ./dist/index.html && echo "ERROR: placeholder still present" && exit 1 || echo "OK: no placeholders remaining"
 
-      # ── DEPLOY from ./dist (no swa-cli.config.json interference) ──
-      - name: Install SWA CLI
-        run: npm install -g @azure/static-web-apps-cli
-
-      - name: Deploy from dist
-        run: |
-          swa deploy ./dist \
-            --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} \
-            --env production \
-            --verbose
+      # ── DEPLOY: Use the Azure action pointed at ./dist ──
+      # app_location is set to dist (the folder we built into).
+      # skip_app_build tells the action not to run its own build step
+      # which would overwrite our injected files with the originals from src.
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: dist
+          skip_app_build: true
+          output_location: ""
 
   close_pull_request:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
@@ -92,13 +99,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Close Pull Request
+        uses: Azure/static-web-apps-deploy@v1
         with:
-          node-version: '20'
-
-      - name: Install SWA CLI
-        run: npm install -g @azure/static-web-apps-cli
-
-      - name: Close staging environment
-        run: swa deploy --deployment-token ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }} --env close
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          action: close
