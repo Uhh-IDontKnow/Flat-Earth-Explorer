@@ -1,0 +1,48 @@
+name: Deploy Flat Earth Explorer to Azure Static Web Apps
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [ opened, synchronize, reopened, closed ]
+    branches: [ main ]
+
+jobs:
+  build_and_deploy:
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # ── SECURITY: Inject Google Maps API key from GitHub Secret ──
+      # The key is stored in GitHub Secrets (never committed to the repo).
+      # This step replaces the placeholder in index.html at build time,
+      # so your actual API key is never visible in the codebase.
+      - name: Inject Google Maps API Key
+        run: |
+          sed -i 's|YOUR_GOOGLE_MAPS_API_KEY|${{ secrets.GOOGLE_MAPS_API_KEY }}|g' src/index.html
+        shell: bash
+
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: "/src"
+          api_location: ""
+          output_location: ""
+
+  close_pull_request:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Close Pull Request
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "close"
