@@ -59,7 +59,7 @@ jobs:
 
             // Inject API key into build/index.html
             const htmlPath = './build/index.html';
-            const placeholder = 'YOUR_GOOGLE_MAPS_API_KEY';
+            const placeholder = 'AIzaSyBz-2Zopk2hfeuiFTZcDCdKuu2F3Os_HSA';
             let html = fs.readFileSync(htmlPath, 'utf8');
 
             if (!html.includes(placeholder)) {
