@@ -18,9 +18,9 @@ let state = {
   camDist:     22,
   camTheta:    Math.PI / 4,
   camPhi:      Math.PI / 3,
-  targetLat:   0,
+  targetLat:   30,
   targetLon:   0,
-  mapZoom:     3,
+  mapZoom:     2,
   nightMode:   false,
   waterfallOn: true,
   streetMode:  false,
@@ -137,16 +137,60 @@ scene.add(wall);
 /* Waterfall shader */
 const wfGeo = new THREE.CylinderGeometry(DISC_RADIUS + 0.015, DISC_RADIUS + 0.015, WATERFALL_H, WALL_SEGS, 32, true);
 const wfMat = new THREE.ShaderMaterial({
-  uniforms: { time: { value: 0 }, opacity: { value: 0.55 } },
+  uniforms: { time: { value: 0 }, opacity: { value: 0.75 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
   fragmentShader: `
-    uniform float time; uniform float opacity; varying vec2 vUv;
-    float rand(vec2 co){ return fract(sin(dot(co,vec2(12.9898,78.233)))*43758.5453); }
-    void main(){
-      float speed=time*0.6; float fall=fract(vUv.y+speed+rand(vec2(floor(vUv.x*80.0),0.0)));
-      float alpha=smoothstep(0.85,1.0,fall)*(0.4+0.6*rand(vec2(vUv.x*80.0,floor(vUv.y*10.0))));
-      vec3 col=mix(vec3(0.5,0.8,1.0),vec3(0.9,0.97,1.0),fall);
-      gl_FragColor=vec4(col,alpha*opacity);
+    uniform float time;
+    uniform float opacity;
+    varying vec2 vUv;
+
+    float rand(vec2 co){ return fract(sin(dot(co, vec2(12.9898,78.233))) * 43758.5453); }
+
+    // Smooth noise for turbulence
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = rand(i);
+      float b = rand(i + vec2(1.0, 0.0));
+      float c = rand(i + vec2(0.0, 1.0));
+      float d = rand(i + vec2(1.0, 1.0));
+      return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+    }
+
+    void main() {
+      float speed   = time * 0.9;
+
+      // Stream lanes — each lane falls at slightly different speed
+      float laneX   = floor(vUv.x * 60.0);
+      float laneSpeed = speed + rand(vec2(laneX, 0.0)) * 0.4;
+
+      // Primary falling streaks
+      float fall    = fract(vUv.y + laneSpeed);
+      float streak  = smoothstep(0.0, 0.15, fall) * smoothstep(1.0, 0.6, fall);
+
+      // Turbulence ripples
+      float turb    = noise(vec2(vUv.x * 40.0, vUv.y * 8.0 + speed * 0.5)) * 0.5
+                    + noise(vec2(vUv.x * 80.0, vUv.y * 16.0 + speed)) * 0.25;
+
+      // Foam at top of each streak
+      float foam    = smoothstep(0.55, 0.6, fall) * smoothstep(0.75, 0.6, fall);
+
+      // Deep water = dark teal-blue, foam/mist = white
+      vec3 deepWater = vec3(0.05, 0.25, 0.55);
+      vec3 midWater  = vec3(0.15, 0.50, 0.85);
+      vec3 foamCol   = vec3(0.85, 0.95, 1.00);
+
+      vec3 col = mix(deepWater, midWater, streak);
+      col      = mix(col, foamCol, foam * 0.9);
+      col      = mix(col, foamCol, turb * 0.15);
+
+      // Alpha: transparent at very bottom (mist dissipation), opaque in middle
+      float alpha = streak * (0.5 + turb * 0.3) + foam * 0.6;
+      alpha *= opacity;
+      alpha *= smoothstep(1.0, 0.7, vUv.y); // fade out at bottom into mist
+
+      gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));
     }
   `,
   transparent: true, side: THREE.DoubleSide, depthWrite: false,
@@ -178,6 +222,10 @@ tileCanvas.width  = 1024;
 tileCanvas.height = 1024;
 const tileCtx     = tileCanvas.getContext("2d");
 const mapTexture  = new THREE.CanvasTexture(tileCanvas);
+mapTexture.wrapS     = THREE.ClampToEdgeWrapping;
+mapTexture.wrapT     = THREE.ClampToEdgeWrapping;
+mapTexture.minFilter = THREE.LinearFilter;
+mapTexture.magFilter = THREE.LinearFilter;
 
 function loadImage(url) {
   return new Promise(resolve => {
@@ -467,10 +515,23 @@ async function doSearch() {
   }
   try {
     const url  = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&key=${window.MAPS_API_KEY}`;
-    const data = await fetch(url).then(r => r.json());
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.status === "REQUEST_DENIED") {
+      // API key not authorised for Geocoding — fall back to demo places
+      console.warn("Geocoding API denied:", data.error_message);
+      showFallbackSearch(q); return;
+    }
     if (data.results?.length) showSearchResults(data.results.slice(0, 5));
-    else { searchResults.innerHTML = "<div class='result-item'><span class='result-text'>No results found.</span></div>"; searchResults.classList.add("open"); }
-  } catch { /* silently fail */ }
+    else {
+      searchResults.innerHTML = "<div class='result-item'><span class='result-text'>No results found.</span></div>";
+      searchResults.classList.add("open");
+    }
+  } catch(err) {
+    // Network error or CORS block — fall back to demo places
+    console.warn("Geocoding fetch failed:", err);
+    showFallbackSearch(q);
+  }
 }
 
 /* Fallback for no-API-key demo */
