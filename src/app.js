@@ -21,7 +21,8 @@
 ═══════════════════════════════════════════════════════ */
 const DISC_RADIUS = 10;
 const DISC_SEGS   = 256;
-const WATERFALL_H = 3.5;
+const WALL_HEIGHT = 4.2;
+const WATERFALL_H = 4.2;
 
 // Seeded RNG — mountains look identical on every load
 let _seed = 42;
@@ -35,9 +36,9 @@ function rng(a, b) { return a + seededRand() * (b - a); }
    1.  STATE
 ═══════════════════════════════════════════════════════ */
 let state = {
-  camDist:    22,
+  camDist:    20,
   camTheta:   Math.PI / 4,
-  camPhi:     Math.PI / 3,
+  camPhi:     Math.PI / 2.6,
   targetLat:  0,
   targetLon:  0,
   nightMode:  false,
@@ -155,68 +156,155 @@ topMesh.position.y  = 0.091;
 topMesh.receiveShadow = true;
 scene.add(topMesh);
 
-/* Atmosphere glow ring */
+/* Atmosphere glow — bright blue rim like the reference image */
 (function() {
-  const geo = new THREE.RingGeometry(DISC_RADIUS * 0.97, DISC_RADIUS * 1.09, DISC_SEGS);
-  const mat = new THREE.MeshBasicMaterial({ color: 0x4aeadc, side: THREE.DoubleSide, transparent: true, opacity: 0.12 });
-  const m   = new THREE.Mesh(geo, mat);
-  m.rotation.x = -Math.PI / 2;
-  m.position.y  = 0.093;
-  scene.add(m);
+  // Thin bright rim
+  var geo1 = new THREE.RingGeometry(DISC_RADIUS * 0.985, DISC_RADIUS * 1.025, DISC_SEGS);
+  var mat1 = new THREE.MeshBasicMaterial({ color: 0x88ddff, side: THREE.DoubleSide, transparent: true, opacity: 0.55 });
+  var m1   = new THREE.Mesh(geo1, mat1);
+  m1.rotation.x = -Math.PI / 2; m1.position.y = 0.094;
+  scene.add(m1);
+  // Wider soft halo
+  var geo2 = new THREE.RingGeometry(DISC_RADIUS * 0.96, DISC_RADIUS * 1.12, DISC_SEGS);
+  var mat2 = new THREE.MeshBasicMaterial({ color: 0x4499cc, side: THREE.DoubleSide, transparent: true, opacity: 0.18 });
+  var m2   = new THREE.Mesh(geo2, mat2);
+  m2.rotation.x = -Math.PI / 2; m2.position.y = 0.093;
+  scene.add(m2);
 })();
 
 /* ═══════════════════════════════════════════════════════
-   5.  ICE MOUNTAINS  (replaces the flat cylinder wall)
+   5.  ICE CLIFF WALL  (continuous rocky cliff, not spikes)
+   Matches the reference: a solid cliff face ringing the
+   disc edge, dark layered rock with snow/ice on top.
+   Built from a CylinderGeometry with vertex displacement
+   + a procedural rock shader.
 ═══════════════════════════════════════════════════════ */
-const iceMountainsGroup = new THREE.Group();
+var iceMountainsGroup = new THREE.Group();
 
-(function buildIceMountains() {
-  const snowMat   = new THREE.MeshStandardMaterial({ color: 0xeef8ff, roughness: 0.40, metalness: 0.18 });
-  const iceMat    = new THREE.MeshStandardMaterial({ color: 0x88c4e0, roughness: 0.22, metalness: 0.32, transparent: true, opacity: 0.90 });
-  const rockMat   = new THREE.MeshStandardMaterial({ color: 0x4a6070, roughness: 0.75, metalness: 0.08 });
-  const shadowMat = new THREE.MeshStandardMaterial({ color: 0x2a3a48, roughness: 0.85, metalness: 0.05 });
+(function buildIceWall() {
 
-  var rings = [
-    { count: 80,  ringR: DISC_RADIUS + 0.05, minH: 1.4, maxH: 3.8, minBaseR: 0.22, maxBaseR: 0.55 },
-    { count: 130, ringR: DISC_RADIUS - 0.50, minH: 0.25,maxH: 1.5, minBaseR: 0.07, maxBaseR: 0.22 },
-    { count: 55,  ringR: DISC_RADIUS + 0.70, minH: 0.3, maxH: 1.0, minBaseR: 0.08, maxBaseR: 0.24 },
-  ];
+  /* ── Rocky cliff face (outer wall) ── */
+  var WALL_SEGS_H = 64;   // vertical resolution for displacement
+  var WALL_SEGS_C = 256;  // circumference resolution
 
-  for (var ri = 0; ri < rings.length; ri++) {
-    var ring = rings[ri];
-    for (var i = 0; i < ring.count; i++) {
-      var angle  = (i / ring.count) * Math.PI * 2 + rng(-0.05, 0.05);
-      var h      = rng(ring.minH, ring.maxH);
-      var base   = rng(ring.minBaseR, ring.maxBaseR);
-      var segs   = 3 + Math.floor(seededRand() * 4);
+  var cliffGeo = new THREE.CylinderGeometry(
+    DISC_RADIUS + 0.08, DISC_RADIUS + 0.08,
+    WALL_HEIGHT, WALL_SEGS_C, WALL_SEGS_H, true
+  );
 
-      var geo = new THREE.ConeGeometry(base, h, segs);
-      var pos = geo.attributes.position;
+  // Displace vertices outward for rocky irregular cliff face
+  var cPos = cliffGeo.attributes.position;
+  for (var i = 0; i < cPos.count; i++) {
+    var x  = cPos.getX(i);
+    var y  = cPos.getY(i);
+    var z  = cPos.getZ(i);
+    var th = Math.atan2(z, x);
 
-      // Displace vertices for jagged look — more at base, none at tip
-      for (var v = 0; v < pos.count; v++) {
-        var vy  = pos.getY(v);
-        var inf = 1.0 - Math.max(0, (vy + h * 0.5) / h);
-        pos.setX(v, pos.getX(v) + rng(-base * 0.40, base * 0.40) * inf);
-        pos.setZ(v, pos.getZ(v) + rng(-base * 0.40, base * 0.40) * inf);
-        pos.setY(v, vy + rng(-h * 0.05, h * 0.05));
-      }
-      geo.computeVertexNormals();
+    // Layered rock strata displacement (horizontal bands)
+    var strata = Math.sin(y * 8.0 + th * 3.0) * 0.06
+               + Math.sin(y * 20.0 + th * 7.0) * 0.03
+               + Math.sin(y * 45.0 + th * 13.0) * 0.015;
 
-      var norm = (h - ring.minH) / (ring.maxH - ring.minH);
-      var mat  = norm > 0.65 ? snowMat : (norm > 0.38 ? iceMat : (norm > 0.18 ? rockMat : shadowMat));
+    // Large-scale cliff undulation
+    var bulge = Math.sin(th * 6.0 + 0.5) * 0.12
+              + Math.sin(th * 14.0 + 1.2) * 0.06
+              + Math.sin(th * 31.0 + 2.8) * 0.03;
 
-      var mesh = new THREE.Mesh(geo, mat);
-      mesh.castShadow = mesh.receiveShadow = true;
-
-      var r = ring.ringR + rng(-0.35, 0.35);
-      mesh.position.set(r * Math.cos(angle), 0.09 + h / 2, r * Math.sin(angle));
-      mesh.rotation.y = rng(0, Math.PI * 2);
-      mesh.rotation.z = rng(-0.20, 0.20);
-      mesh.rotation.x = rng(-0.07, 0.07);
-      iceMountainsGroup.add(mesh);
-    }
+    var rad   = Math.sqrt(x*x + z*z);
+    var newRad = rad + strata + bulge;
+    cPos.setX(i, (x / rad) * newRad);
+    cPos.setZ(i, (z / rad) * newRad);
+    // Vertical rocky irregularity
+    cPos.setY(i, y + Math.sin(th * 11.0 + y * 6.0) * 0.04);
   }
+  cliffGeo.computeVertexNormals();
+
+  // Procedural rock shader — dark layered stone with lighter seams
+  var cliffMat = new THREE.ShaderMaterial({
+    uniforms: {},
+    vertexShader: `
+      varying vec3 vPos;
+      varying vec3 vNorm;
+      void main(){
+        vPos  = position;
+        vNorm = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vPos;
+      varying vec3 vNorm;
+
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5); }
+      float noise(vec2 p){
+        vec2 i=floor(p), f=fract(p);
+        f=f*f*(3.-2.*f);
+        return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+                   mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+      }
+
+      void main(){
+        float th = atan(vPos.z, vPos.x);
+
+        // Rock base colour — dark slate
+        vec3 rock1 = vec3(0.18, 0.16, 0.14);
+        vec3 rock2 = vec3(0.28, 0.24, 0.20);
+        vec3 rock3 = vec3(0.10, 0.09, 0.08);
+
+        // Strata bands
+        float strata = noise(vec2(th * 8.0, vPos.y * 6.0));
+        float cracks = noise(vec2(th * 22.0 + 0.3, vPos.y * 18.0));
+        float coarse = noise(vec2(th * 4.0,  vPos.y * 3.0));
+
+        vec3 col = mix(rock1, rock2, strata);
+        col = mix(col, rock3, cracks * 0.4);
+        col = mix(col, rock2 * 1.3, coarse * 0.25);
+
+        // Snow/ice cap near top (vPos.y > WALL_HEIGHT*0.3)
+        float wallTop = ${WALL_HEIGHT.toFixed(1)};
+        float snowT = smoothstep(wallTop*0.25, wallTop*0.45, vPos.y + wallTop*0.5);
+        vec3 snowCol = vec3(0.88, 0.93, 0.97);
+        col = mix(col, snowCol, snowT * 0.85);
+
+        // Diffuse lighting from above
+        float diff = max(0.0, dot(vNorm, normalize(vec3(0.5,1.0,0.3)))) * 0.7 + 0.3;
+        col *= diff;
+
+        // Slight blue-tint atmospheric haze on the ice portions
+        col = mix(col, vec3(0.6,0.75,0.9), snowT * 0.15);
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `.replace('${WALL_HEIGHT.toFixed(1)}', '4.2'),
+    side: THREE.DoubleSide,
+  });
+
+  var cliffMesh = new THREE.Mesh(cliffGeo, cliffMat);
+  cliffMesh.position.y = 0.09 - WALL_HEIGHT / 2 + 0.1;
+  cliffMesh.castShadow    = true;
+  cliffMesh.receiveShadow = true;
+  iceMountainsGroup.add(cliffMesh);
+
+  /* ── Snow cap ring on top ── */
+  var capGeo = new THREE.TorusGeometry(DISC_RADIUS + 0.08, 0.35, 12, WALL_SEGS_C);
+  var capMat = new THREE.MeshStandardMaterial({
+    color: 0xddeeff, roughness: 0.5, metalness: 0.1
+  });
+  var cap = new THREE.Mesh(capGeo, capMat);
+  cap.rotation.x  = Math.PI / 2;
+  cap.position.y  = 0.09 + 0.22;
+  cap.castShadow  = true;
+  iceMountainsGroup.add(cap);
+
+  /* ── Inner base ring (fills gap between disc edge and cliff) ── */
+  var baseGeo = new THREE.CylinderGeometry(
+    DISC_RADIUS + 0.06, DISC_RADIUS + 0.06,
+    0.20, WALL_SEGS_C, 1, true
+  );
+  var baseMat = new THREE.MeshStandardMaterial({ color: 0x8ab8cc, roughness: 0.4, metalness: 0.2 });
+  var baseMesh = new THREE.Mesh(baseGeo, baseMat);
+  baseMesh.position.y = 0.09 - 0.10;
+  iceMountainsGroup.add(baseMesh);
 
   scene.add(iceMountainsGroup);
 })();
@@ -261,7 +349,7 @@ const wfMat = new THREE.ShaderMaterial({
   transparent: true, side: THREE.DoubleSide, depthWrite: false,
 });
 const waterfall = new THREE.Mesh(wfGeo, wfMat);
-waterfall.position.y = 0.09 - WATERFALL_H / 2;
+waterfall.position.y = 0.09 - WALL_HEIGHT / 2;
 scene.add(waterfall);
 
 /* ═══════════════════════════════════════════════════════
@@ -549,9 +637,9 @@ document.getElementById("zoomOut").addEventListener("click", function() {
   state.camDist = Math.min(80, state.camDist + 2.5); updateCamera();
 });
 document.getElementById("btnReset").addEventListener("click", function() {
-  state.camDist  = 22;
+  state.camDist  = 20;
   state.camTheta = Math.PI / 4;
-  state.camPhi   = Math.PI / 3;
+  state.camPhi   = Math.PI / 2.6;
   updateCamera();
   loadDiscTexture(); // reload world overview on reset only
 });
